@@ -2,7 +2,7 @@ name: 同步上游GitHub Release到Gitee
 on:
   workflow_dispatch:  # 支持手动一键运行同步
   schedule:
-    - cron: '0 8 * * *' # 每日早上8点自动检测新版本同步
+    - cron: '0 0 * * *' # 每日早上8点自动检测新版本同步
 jobs:
   sync:
     runs-on: ubuntu-latest
