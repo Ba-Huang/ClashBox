@@ -1,17 +1,93 @@
-name: 同步GitHub Release到Gitee
+name: 同步GitHub Release到GitCode
 on:
   workflow_dispatch:  # 支持手动一键运行同步
   schedule:
-    - cron: '0 0 * * *' # 每日早上8点自动检测新版本同步
+    - cron: '0 0 * * *' # 每日早上8点(北京时间)自动检测新版本同步
 jobs:
   sync:
     runs-on: ubuntu-latest
     steps:
-      - name: 抓取上游Release同步至Gitee
-        uses: trustedinster/sync-release-gitee@v1.3
-        with:
-          github_owner: xiaobaigroup
-          github_repo: ClashBox
-          gitee_owner: ba_huang
-          gitee_repo: ClashBox
-          gitee_token: ${{ secrets.GITEE_TOKEN }}
+      - name: 抓取上游Release同步至GitCode
+        env:
+          GITCODE_TOKEN: ${{ secrets.GITCODE_TOKEN }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          python3 << 'EOF'
+          import os, sys, requests
+          from urllib.parse import quote
+
+          GH_OWNER, GH_REPO = "xiaobaigroup", "ClashBox"
+          GC_OWNER, GC_REPO = "BaHuangOvO", "clashbox"
+          GC_API = "https://api.gitcode.com/api/v5"
+
+          gh = requests.Session()
+          gh.headers["Accept"] = "application/vnd.github+json"
+          if os.environ.get("GH_TOKEN"):
+              gh.headers["Authorization"] = f"Bearer {os.environ['GH_TOKEN']}"
+
+          gc = requests.Session()
+          gc.headers.update({
+              "Authorization": f"Bearer {os.environ['GITCODE_TOKEN']}",
+              "Accept": "application/json",
+          })
+
+          # 获取 GitHub 全部 Release
+          releases, page = [], 1
+          while True:
+              r = gh.get(f"https://api.github.com/repos/{GH_OWNER}/{GH_REPO}/releases",
+                         params={"per_page": 100, "page": page}, timeout=30)
+              r.raise_for_status()
+              data = r.json()
+              if not data:
+                  break
+              releases.extend(data)
+              page += 1
+
+          # 获取 GitCode 已有 Release 的 tag
+          existing, page = set(), 1
+          while True:
+              r = gc.get(f"{GC_API}/repos/{GC_OWNER}/{GC_REPO}/releases",
+                         params={"per_page": 100, "page": page}, timeout=30)
+              r.raise_for_status()
+              data = r.json()
+              if not data:
+                  break
+              existing.update(x["tag_name"] for x in data)
+              page += 1
+
+          for rel in releases:
+              if rel.get("draft"):
+                  continue
+              tag = rel["tag_name"]
+              if tag not in existing:
+                  r = gc.post(f"{GC_API}/repos/{GC_OWNER}/{GC_REPO}/releases", json={
+                      "tag_name": tag,
+                      "name": rel.get("name") or tag,
+                      "body": rel.get("body") or "",
+                      "target_commitish": rel.get("target_commitish") or "main",
+                  }, timeout=30)
+                  if r.status_code not in (200, 201, 409):
+                      print(f"[跳过] 创建 Release {tag} 失败: {r.status_code} {r.text}", file=sys.stderr)
+                      continue
+                  print(f"已创建 Release: {tag}")
+              else:
+                  print(f"Release 已存在，仅同步附件: {tag}")
+
+              # 同步附件
+              for asset in rel.get("assets", []):
+                  name = asset["name"]
+                  print(f"  下载 {name} ...")
+                  d = gh.get(asset["browser_download_url"], timeout=600)
+                  d.raise_for_status()
+                  u = gc.get(f"{GC_API}/repos/{GC_OWNER}/{GC_REPO}/releases/{quote(tag, safe='')}/upload_url",
+                             params={"file_name": name}, timeout=30)
+                  u.raise_for_status()
+                  info = u.json()
+                  print(f"  上传 {name} ({len(d.content)} 字节) ...")
+                  p = requests.put(info["url"], headers=info.get("headers") or {},
+                                   data=d.content, timeout=1800)
+                  p.raise_for_status()
+                  print(f"  完成 {name}")
+
+          print("全部同步完成")
+          EOF
