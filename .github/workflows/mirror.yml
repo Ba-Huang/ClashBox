@@ -1,15 +1,184 @@
-name: 分片稳定同步Release
+name: 手动同步到Gitee
 on:
-  workflow_dispatch:  # 仅保留手动一键运行，删除定时schedule自动检测
+  workflow_dispatch:  # 支持手动一键运行同步
+
 jobs:
   sync:
     runs-on: ubuntu-latest
     steps:
-      - name: 分片同步Release
-        uses: hepengju/release2gitee-action@latest
-        with:
-          github_owner: xiaobaigroup
-          github_repo: ClashBox
-          gitee_owner: ba_huang
-          gitee_repo: ClashBox
-          gitee_token: ${{ secrets.GITEE_TOKEN }}
+      - name: 并行同步Release到Gitee
+        env:
+          GITEE_TOKEN: ${{ secrets.GITEE_TOKEN }}
+        run: |
+          python3 << 'PYEOF'
+          import json, os, subprocess, tempfile, shutil
+          import concurrent.futures, time, sys
+
+          # ==================== 配置 ====================
+          GITEE_TOKEN  = os.environ["GITEE_TOKEN"]
+          GH_OWNER     = "xiaobaigroup"
+          GH_REPO      = "ClashBox"
+          GITEE_OWNER  = "ba_huang"
+          GITEE_REPO   = "ClashBox"
+          MAX_WORKERS  = 4          # 并行上传线程数
+          MAX_RETRIES  = 3          # 上传失败重试次数
+          RETRY_DELAY  = 3          # 重试间隔（秒）
+
+          GH_API    = f"https://api.github.com/repos/{GH_OWNER}/{GH_REPO}"
+          GITEE_API = f"https://gitee.com/api/v5/repos/{GITEE_OWNER}/{GITEE_REPO}"
+
+          # ==================== 工具函数 ====================
+
+          def log(msg):
+              print(f"[{time.strftime('%H:%M:%S')}] {msg}", flush=True)
+
+          def curl_get(url):
+              r = subprocess.run(["curl", "-sfL", "--max-time", "120", url],
+                                  capture_output=True, text=True)
+              if r.returncode != 0:
+                  raise RuntimeError(f"GET 失败: {url}\n{r.stderr}")
+              return json.loads(r.stdout) if r.stdout.strip() else []
+
+          def gitee_create_release(tag, name, body, target):
+              payload = json.dumps({
+                  "access_token": GITEE_TOKEN,
+                  "tag_name": tag,
+                  "name": name,
+                  "body": body,
+                  "target_commitish": target
+              })
+              r = subprocess.run(
+                  ["curl", "-sf", "-X", "POST", f"{GITEE_API}/releases",
+                   "-H", "Content-Type: application/json",
+                   "-d", payload],
+                  capture_output=True, text=True
+              )
+              if r.returncode != 0:
+                  raise RuntimeError(f"创建 Release {tag} 失败:\n{r.stderr}")
+              return json.loads(r.stdout)
+
+          def sync_one_asset(download_url, asset_name, release_id, tmp_dir):
+              """下载一个 GitHub 附件并上传到 Gitee（线程池中并行调用）"""
+              tmp_file = os.path.join(tmp_dir, f"{release_id}_{asset_name}")
+              success = False
+
+              # --- 下载 ---
+              r = subprocess.run(
+                  ["curl", "-sfL", "--max-time", "300", download_url, "-o", tmp_file],
+                  capture_output=True, text=True
+              )
+              if r.returncode != 0:
+                  log(f"  [FAIL] 下载失败: {asset_name} - {r.stderr.strip()}")
+                  return False
+
+              # --- 上传（带重试）---
+              for attempt in range(1, MAX_RETRIES + 1):
+                  r = subprocess.run(
+                      ["curl", "-sf", "-X", "POST",
+                       f"{GITEE_API}/releases/{release_id}/attach_files",
+                       "-F", f"access_token={GITEE_TOKEN}",
+                       "-F", f"file=@{tmp_file}"],
+                      capture_output=True, text=True
+                  )
+                  if r.returncode == 0:
+                      log(f"  [OK]  {asset_name}  (第{attempt}次成功)")
+                      success = True
+                      break
+                  if attempt < MAX_RETRIES:
+                      log(f"  [RETRY] {asset_name} 第{attempt}次失败，{RETRY_DELAY}s后重试...")
+                      time.sleep(RETRY_DELAY)
+                  else:
+                      log(f"  [FAIL] 上传失败: {asset_name} (重试{MAX_RETRIES}次仍失败)")
+
+              # 清理临时文件
+              if os.path.exists(tmp_file):
+                  os.remove(tmp_file)
+              return success
+
+          # ==================== 主流程 ====================
+
+          def main():
+              tmp_dir = tempfile.mkdtemp(prefix="gitee_sync_")
+              try:
+                  # 1. 获取 GitHub Release 列表（一次请求，不重复）
+                  log("=" * 50)
+                  log(f"GitHub {GH_OWNER}/{GH_REPO} -> Gitee {GITEE_OWNER}/{GITEE_REPO}")
+                  log("获取 GitHub Release 列表...")
+                  gh_releases = curl_get(f"{GH_API}/releases?per_page=100")
+                  log(f"  GitHub 共 {len(gh_releases)} 个 Release")
+
+                  # 2. 获取 Gitee Release 列表（含已有附件信息）
+                  log("获取 Gitee Release 列表...")
+                  gitee_releases = curl_get(
+                      f"{GITEE_API}/releases?per_page=100&access_token={GITEE_TOKEN}"
+                  )
+                  gitee_map = {r["tag_name"]: r for r in gitee_releases}
+                  log(f"  Gitee 已有 {len(gitee_map)} 个 Release")
+                  log("=" * 50)
+
+                  new_count = 0
+                  skip_count = 0
+
+                  for rel in gh_releases:
+                      tag    = rel["tag_name"]
+                      name   = rel.get("name") or tag
+                      body   = rel.get("body") or ""
+                      target = rel.get("target_commitish") or "master"
+                      assets = rel.get("assets", [])
+
+                      if tag in gitee_map:
+                          # Release 已存在 → 检查是否有缺失附件
+                          existing_assets = {
+                              a["name"] for a in gitee_map[tag].get("assets", [])
+                          }
+                          missing = [
+                              a for a in assets
+                              if a["name"] not in existing_assets and a.get("browser_download_url")
+                          ]
+                          if not missing:
+                              skip_count += 1
+                              continue
+
+                          log(f"[补传] {tag} - 缺失 {len(missing)} 个附件")
+                          release_id = gitee_map[tag]["id"]
+                          to_upload = missing
+                      else:
+                          # 新 Release → 创建并上传全部附件
+                          log(f"[同步] {tag}")
+                          gitee_rel = gitee_create_release(tag, name, body, target)
+                          release_id = gitee_rel["id"]
+                          log(f"  Release ID: {release_id}")
+                          to_upload = [a for a in assets if a.get("browser_download_url")]
+                          new_count += 1
+
+                      # 并行下载+上传附件
+                      if to_upload:
+                          log(f"  开始并行上传 {len(to_upload)} 个附件 (线程数={MAX_WORKERS})...")
+                          with concurrent.futures.ThreadPoolExecutor(max_workers=MAX_WORKERS) as pool:
+                              futures = {
+                                  pool.submit(sync_one_asset,
+                                              a["browser_download_url"],
+                                              a["name"],
+                                              release_id,
+                                              tmp_dir): a["name"]
+                                  for a in to_upload
+                              }
+                              done = 0
+                              for f in concurrent.futures.as_completed(futures):
+                                  done += 1
+                                  log(f"  进度: {done}/{len(to_upload)}")
+                      else:
+                          log(f"  无附件需要上传")
+
+                      log(f"  [完成] {tag}")
+
+                  log("=" * 50)
+                  log(f"同步完成! 新建 {new_count} 个, 跳过 {skip_count} 个, 补传若干附件")
+                  log("=" * 50)
+
+              finally:
+                  shutil.rmtree(tmp_dir, ignore_errors=True)
+
+          if __name__ == "__main__":
+              main()
+          PYEOF
