@@ -1,0 +1,18 @@
+name: 同步上游GitHub Release到Gitee
+on:
+  workflow_dispatch:  # 支持手动一键运行同步
+  schedule:
+    - cron: '0 8 * * *' # 每日早上8点自动检测新版本同步
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 抓取上游Release同步至Gitee
+        uses: trustedinster/sync-release-gitee@v1.3
+        with:
+          # ==========这里改成对应信息==========
+          github_owner: xiaobaigroup
+          github_repo: ClashBox
+          gitee_owner: ba_huang
+          gitee_repo: ClashBox
+          gitee_token: ${{ secrets.GITEE_TOKEN }}
