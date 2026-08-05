@@ -1,4 +1,4 @@
-name: 同步上游GitHub Release到Gitee
+name: 同步GitHub Release到Gitee
 on:
   workflow_dispatch:  # 支持手动一键运行同步
   schedule:
