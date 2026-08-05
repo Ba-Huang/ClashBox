@@ -10,7 +10,6 @@ jobs:
       - name: 抓取上游Release同步至Gitee
         uses: trustedinster/sync-release-gitee@v1.3
         with:
-          # ==========这里改成对应信息==========
           github_owner: xiaobaigroup
           github_repo: ClashBox
           gitee_owner: ba_huang
