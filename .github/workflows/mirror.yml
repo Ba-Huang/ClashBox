@@ -1,0 +1,15 @@
+name: 分片稳定同步Release
+on:
+  workflow_dispatch:  # 仅保留手动一键运行，删除定时schedule自动检测
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 分片同步Release
+        uses: hepengju/release2gitee-action@latest
+        with:
+          github_owner: xiaobaigroup
+          github_repo: ClashBox
+          gitee_owner: ba_huang
+          gitee_repo: ClashBox
+          gitee_token: ${{ secrets.GITEE_TOKEN }}
