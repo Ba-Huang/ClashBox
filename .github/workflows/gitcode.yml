@@ -1,0 +1,23 @@
+name: 同步GitHub Release到GitCode
+
+on:
+  workflow_dispatch:   # 支持手动一键运行同步
+
+permissions:
+  contents: read
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 抓取上游Release同步至GitCode
+        uses: Ba-Huang/gitcode-sync-action@v1.0.0
+        with:
+          source_repo: xiaobaigroup/ClashBox     # 上游 GitHub 仓库
+          gitcode_username: BaHuangOvO              # 你的 GitCode 用户名
+          gitcode_repo: BaHuangOvO/clashbox         # GitCode 目标仓库
+          gitcode_token: ${{ secrets.GITCODE_TOKEN }}
+          sync_branches: true
+          sync_tags: true
+          sync_releases: true
+          force_push: false
